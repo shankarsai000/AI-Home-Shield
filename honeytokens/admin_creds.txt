@@ -1,0 +1,7 @@
+# Admin Credentials Backup
+# Exported: 2026-01-18 03:07:19
+Username: administrator
+Password: AdminPass789!
+Email: admin@homelan.local
+token_id: DGZIIJUO
+secret_marker: TOKEN_SECRET_TOSS1BIX

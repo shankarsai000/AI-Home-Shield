@@ -1,0 +1,25 @@
+# Python caches and bytecode
+__pycache__/
+*.pyc
+
+# Logs, reports, captures
+logs/
+reports/
+captures/
+
+# Specific data files and packet captures
+data/live_flows.csv
+data/*.pcap
+
+# Environment and secrets
+.env
+
+# Trained model binaries (optional)
+models/*.pkl
+
+# Editor / OS files
+.vscode/
+venv/
+env/
+Thumbs.db
+desktop.ini

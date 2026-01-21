@@ -1,0 +1,42 @@
+[
+  {
+    "device_name": "WiFi Router",
+    "ip": "192.168.1.1",
+    "mac": "AA:BB:CC:DD:EE:01",
+    "vendor": "TP-Link",
+    "open_ports": [53, 80, 443],
+    "firmware_status": "UNKNOWN"
+  },
+  {
+    "device_name": "Smart TV",
+    "ip": "192.168.1.10",
+    "mac": "AA:BB:CC:DD:EE:10",
+    "vendor": "Samsung",
+    "open_ports": [80, 443],
+    "firmware_status": "OUTDATED"
+  },
+  {
+    "device_name": "IP Camera",
+    "ip": "192.168.1.12",
+    "mac": "AA:BB:CC:DD:EE:12",
+    "vendor": "Generic",
+    "open_ports": [23, 554, 80],
+    "firmware_status": "OUTDATED"
+  },
+  {
+    "device_name": "Smart Bulb",
+    "ip": "192.168.1.15",
+    "mac": "AA:BB:CC:DD:EE:15",
+    "vendor": "Xiaomi",
+    "open_ports": [6668],
+    "firmware_status": "OK"
+  },
+  {
+    "device_name": "Laptop",
+    "ip": "192.168.1.20",
+    "mac": "AA:BB:CC:DD:EE:20",
+    "vendor": "Dell",
+    "open_ports": [135, 445],
+    "firmware_status": "OK"
+  }
+]
