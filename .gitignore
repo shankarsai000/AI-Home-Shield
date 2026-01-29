@@ -21,5 +21,6 @@ models/*.pkl
 .vscode/
 venv/
 env/
+.venv/
 Thumbs.db
 desktop.ini
