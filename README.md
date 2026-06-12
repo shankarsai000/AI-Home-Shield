@@ -163,6 +163,16 @@ pip install -r requirements.txt
 streamlit run app.py
 ⚠️ Run as Administrator (Windows recommended) for firewall blocking to work properly.
 
+## 📱 Mobile App (Flutter WebView Wrapper)
+Use the lightweight Flutter wrapper in `mobile_app/` to run the Streamlit UI inside a native iOS/Android shell.
+
+Quick steps:
+1. Start the backend: `streamlit run app.py --server.address 0.0.0.0 --server.port 8501`
+2. Set `kBackendUrl` in `mobile_app/lib/main.dart` to your LAN/hosted URL
+3. Run: `flutter run`
+
+See `mobile_app/README.md` for full instructions.
+
 🏆 Achievement
 
 🥉 Won 3rd Prize at IIT Delhi

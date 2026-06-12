@@ -1,0 +1,14 @@
+name: ai_home_shield_mobile
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  webview_flutter: ^4.4.4
+
+flutter:
+  uses-material-design: true
