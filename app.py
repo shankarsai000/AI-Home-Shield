@@ -9,7 +9,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 try:
-    from utils.device_scanner_win import discover_devices, scan_ports
+    from utils.device_scanner_win import discover_devices, scan_ports, get_default_subnet, find_nmap_path
     _scanner_import_error = None
 except Exception as _e:
     _scanner_import_error = _e
@@ -19,6 +19,12 @@ except Exception as _e:
 
     def scan_ports(*args, **kwargs):
         return []
+
+    def get_default_subnet():
+        return "172.21.6.0/24"
+
+    def find_nmap_path():
+        return "nmap"
 
 from agents.discovery_agent import discover_devices_demo, mutate_devices
 from agents.risk_agent import profile_all_devices, auto_patch_device, RISKY_PORTS
@@ -32,8 +38,21 @@ from agents.response_agent import (
     quarantine_device,
     block_attacker_ip,
     log_alert,
+    ResponseAgent,
 )
-from agents.orchestrator_agent import decide_actions
+from agents.orchestrator_agent import decide_actions, OrchestratorAgent
+from agents.safety_agent import SafetyAgent
+from agents.verification_agent import VerificationAgent
+from agents.network_state_agent import NetworkStateAgent
+from agents.attack_forecasting_agent import AttackForecastingAgent
+from security.allowlist import Allowlist
+from security.audit import AuditTrail
+from security.policy import PolicyGate
+from storage.database import ShieldDatabase
+from storage.evidence import EvidenceStore
+from capture.packet_capture import PacketCaptureAdapter
+from capture.flow_builder import FlowBuilder
+from capture.feature_extractor import FeatureExtractor
 from agents.flow_tracker_agent import NetworkFlowTracker
 
 try:
@@ -183,8 +202,15 @@ def collect_happenings(limit: int = 50):
     return happenings
 
 
-def safe_block_ip(ip: str, reason: str = "") -> dict:
+def safe_block_ip(ip: str, reason: str = "", bypass_policy: bool = False) -> dict:
     try:
+        resp_agent = st.session_state.get("response_agent")
+        if resp_agent:
+            res = resp_agent.execute_block(ip, reason=reason, bypass_policy=bypass_policy)
+            fw_res = res.get("firewall_result", {})
+            if not fw_res:
+                return {"ok": res.get("ok", False), "message": res.get("reason", ""), "requires_admin": False}
+            return fw_res
         agent = st.session_state.get("firewall_agent", None)
         if agent is None:
             raise RuntimeError("firewall_agent not initialized")
@@ -194,7 +220,7 @@ def safe_block_ip(ip: str, reason: str = "") -> dict:
             "ok": False,
             "platform": "linux",
             "cmd": "",
-            "message": "Firewall block failed",
+            "message": f"Firewall block failed: {e}",
             "error": str(e),
             "requires_admin": True,
         }
@@ -396,7 +422,15 @@ score_placeholder = st.empty()
 st.sidebar.header("⚙️ Controls")
 page = st.sidebar.radio(
     "Go to",
-    ["📡 Devices & Risk", "⚡ Threat Monitor", "🧠 Response + Deception", "📁 Evidence", "🚀 One-Click Demo"],
+    [
+        "📡 Devices & Risk",
+        "⚡ Threat Monitor",
+        "🔮 Attack Forecasting",
+        "🛡️ Policy & Safety",
+        "🧠 Response + Deception",
+        "📁 Evidence",
+        "🚀 One-Click Demo",
+    ],
 )
 
 st.sidebar.divider()
@@ -410,8 +444,9 @@ auto_refresh = st.sidebar.checkbox("🔄 Enable Real-time Device Simulation", va
 refresh_seconds = st.sidebar.slider("Refresh interval (sec)", 1, 10, 3)
 
 st.sidebar.divider()
-st.sidebar.subheader("Agent Controls")
+st.sidebar.subheader("Agent & Safety Controls")
 autonomous_mode = st.sidebar.checkbox("Autonomous Mode", value=True)
+dry_run_mode = st.sidebar.checkbox("🧪 Dry-Run Mode (Simulate Enforcement)", value=False)
 
 if st.sidebar.button("🎛️ Demo Mode: Start Monitoring + Honeypot + Simulation"):
     st.session_state.monitoring = True
@@ -644,6 +679,62 @@ if "baseline_agent" not in st.session_state or st.session_state.get("baseline_ag
     except Exception:
         st.session_state.baseline_agent = None
 
+if "allowlist" not in st.session_state:
+    st.session_state.allowlist = Allowlist()
+
+if "audit_trail" not in st.session_state:
+    st.session_state.audit_trail = AuditTrail()
+
+if "policy_gate" not in st.session_state:
+    st.session_state.policy_gate = PolicyGate(allowlist=st.session_state.allowlist)
+
+if "shield_db" not in st.session_state:
+    st.session_state.shield_db = ShieldDatabase()
+
+if "evidence_store" not in st.session_state:
+    st.session_state.evidence_store = EvidenceStore()
+
+if "safety_agent" not in st.session_state:
+    st.session_state.safety_agent = SafetyAgent(
+        policy_gate=st.session_state.policy_gate,
+        audit_trail=st.session_state.audit_trail,
+    )
+
+if "verification_agent" not in st.session_state:
+    st.session_state.verification_agent = VerificationAgent(audit_trail=st.session_state.audit_trail)
+
+if "network_state_agent" not in st.session_state:
+    st.session_state.network_state_agent = NetworkStateAgent()
+
+if "attack_forecasting_agent" not in st.session_state:
+    st.session_state.attack_forecasting_agent = AttackForecastingAgent()
+
+if "response_agent" not in st.session_state:
+    st.session_state.response_agent = ResponseAgent(
+        firewall_agent=st.session_state.firewall_agent,
+        safety_agent=st.session_state.safety_agent,
+        verification_agent=st.session_state.verification_agent,
+        audit_trail=st.session_state.audit_trail,
+    )
+
+if "orchestrator_agent" not in st.session_state:
+    st.session_state.orchestrator_agent = OrchestratorAgent(
+        safety_agent=st.session_state.safety_agent,
+        audit_trail=st.session_state.audit_trail,
+    )
+
+if "packet_capture" not in st.session_state:
+    st.session_state.packet_capture = PacketCaptureAdapter()
+
+if "flow_builder" not in st.session_state:
+    st.session_state.flow_builder = FlowBuilder()
+
+if "feature_extractor" not in st.session_state:
+    st.session_state.feature_extractor = FeatureExtractor()
+
+if "last_forecast" not in st.session_state:
+    st.session_state.last_forecast = {}
+
 try:
     os.makedirs("logs", exist_ok=True)
     if not os.path.exists("logs/honeypot.log"):
@@ -660,15 +751,25 @@ _update_score_metric()
 def convert_scan_to_internal_devices(scan_list):
     converted = []
     for i, d in enumerate(scan_list, start=1):
+        ip = d.get("ip", "N/A")
+        vendor = d.get("vendor", "Unknown")
+        mac = d.get("mac", "N/A")
+        if vendor and vendor != "Unknown":
+            dev_name = f"{vendor} Device ({ip.split('.')[-1]})"
+        elif ip.endswith(".1"):
+            dev_name = f"Default Gateway ({ip})"
+        else:
+            dev_name = f"Host_{ip.replace('.', '_')}"
+
         converted.append({
-            "device_name": f"RealScan_Device_{i}",
-            "ip": d.get("ip", "N/A"),
-            "vendor": d.get("vendor", "Unknown"),
-            "mac": d.get("mac", "N/A"),
+            "device_name": dev_name,
+            "ip": ip,
+            "vendor": vendor,
+            "mac": mac,
             "open_ports": [],
             "firmware_status": "unknown",
             "_mutations": 0,
-            "_last_change": "RealScan discovered"
+            "_last_change": "Discovered via Nmap + Npcap",
         })
     return converted
 
@@ -687,33 +788,40 @@ if page == "📡 Devices & Risk":
         key="device_source_mode",
     )
 
-    subnet = "172.24.118.0/24"
+    detected_subnet = get_default_subnet()
+    subnet = detected_subnet
 
     # ✅ Real Scan Mode controls
     if device_source == "🟢 Real Scan Devices (Nmap)":
-        st.info("✅ Real Scan Mode: Uses Nmap ARP discovery + Safe TCP port scan (Top-50).")
-        subnet = st.text_input("Subnet to scan", value=subnet)
+        nmap_bin = find_nmap_path()
+        st.success(f"🟢 **Nmap & Npcap Engine Active**: `{nmap_bin}`")
+        st.caption(f"Auto-detected local LAN subnet: `{detected_subnet}`. Supports CIDRs (e.g. `172.21.6.0/24`) or IP ranges (e.g. `172.21.6.1-50`).")
+        subnet = st.text_input("Subnet / Target IP specification", value=detected_subnet)
 
         c1, c2 = st.columns([1, 1])
-        scan_now = c1.button("🔍 Scan Devices Now")
-        auto_scan_refresh = c2.toggle("🔁 Auto refresh (10s)", value=False)
+        scan_now = c1.button("🔍 Scan Devices Now (Nmap ARP)")
+        auto_scan_refresh = c2.toggle("🔁 Auto refresh (15s)", value=False)
 
         if "real_scan_devices" not in st.session_state:
             st.session_state.real_scan_devices = []
 
         if scan_now or auto_scan_refresh:
-            try:
-                scanned = discover_devices(subnet=subnet)
-            except Exception as e:
-                st.error(f"Device discovery failed: {e}")
-                scanned = []
-            st.session_state.real_scan_devices = profile_all_devices(
-                convert_scan_to_internal_devices(scanned)
-            )
-            st.session_state.devices = st.session_state.real_scan_devices
+            with st.spinner(f"Scanning {subnet} with Nmap + Npcap..."):
+                try:
+                    scanned = discover_devices(subnet=subnet)
+                except Exception as e:
+                    st.error(f"Device discovery failed: {e}")
+                    scanned = []
+                st.session_state.real_scan_devices = profile_all_devices(
+                    convert_scan_to_internal_devices(scanned)
+                )
+                st.session_state.devices = st.session_state.real_scan_devices
+                if st.session_state.get("shield_db") and st.session_state.devices:
+                    st.session_state.shield_db.save_devices(st.session_state.devices)
+                st.success(f"Discovered {len(scanned)} active device(s) on {subnet}!")
 
         if auto_scan_refresh:
-            time.sleep(10)
+            time.sleep(15)
             st.rerun()
 
     col1, col2, col3 = st.columns(3)
@@ -1463,6 +1571,38 @@ if page == "⚡ Threat Monitor":
                 "Persistence": session_pred.get("persistence", 0),
             })
 
+            # Update time-indexed NetworkStateAgent & AttackForecastingAgent (Architecture Sections 5 & 19)
+            net_agent = st.session_state.get("network_state_agent")
+            if net_agent:
+                try:
+                    recent_attacks = sum(1 for l in logs[-20:] if _is_attack_label(l.get("Flow_Label")))
+                    current_score = _compute_home_shield_score()
+                    net_agent.update_state(
+                        active_flows=len(logs),
+                        attack_flows=recent_attacks,
+                        benign_flows=max(0, len(logs) - recent_attacks),
+                        avg_attack_prob=float(flow_pred["attack_prob"]),
+                        max_attack_prob=float(max([l.get("Flow_Prob", 0) for l in logs[-20:]] or [flow_pred["attack_prob"]])),
+                        session_label=str(session_pred["session_label"]),
+                        session_prob=float(session_pred["session_prob"]),
+                        session_persistence=int(session_pred.get("persistence", 0)),
+                        device_count=len(st.session_state.get("devices", [])),
+                        max_device_risk=max([d.get("risk_score", 0) for d in st.session_state.get("devices", [])] or [0]),
+                        device_anomalies=len(st.session_state.get("device_anomalies", [])),
+                        network_anomalies=len(st.session_state.get("network_anomalies", [])),
+                        honeypot_hits=len(st.session_state.get("honeypot_events", [])),
+                        blocked_ips=len(st.session_state.get("blocked_ips", [])),
+                        quarantined_devices=len(st.session_state.get("quarantined_devices", [])),
+                        home_shield_score=current_score,
+                    )
+                    forecaster = st.session_state.get("attack_forecasting_agent")
+                    if forecaster:
+                        st.session_state.last_forecast = forecaster.forecast(network_state_agent=net_agent)
+                    if st.session_state.get("shield_db"):
+                        st.session_state.shield_db.save_score(current_score)
+                except Exception:
+                    pass
+
             feed.dataframe(pd.DataFrame(logs[-15:]), use_container_width=True)
             time.sleep(1 / speed)
 
@@ -1473,7 +1613,316 @@ if page == "⚡ Threat Monitor":
 
 
 # =========================
-# PAGE 3: RESPONSE + DECEPTION
+# PAGE 3: ATTACK FORECASTING (Architecture Section 5 & 10)
+# =========================
+if page == "🔮 Attack Forecasting":
+    st.subheader("🔮 Predictive Intelligence & Attack Progression Forecasting")
+    st.caption("Architecture Ref: Section 5 & 10 — Time-Indexed State Sequences, ATT&CK Mapping & Horizon Projections")
+
+    forecaster = st.session_state.get("attack_forecasting_agent")
+    net_state = st.session_state.get("network_state_agent")
+
+    forecast = st.session_state.get("last_forecast", {})
+    if not forecast and forecaster and net_state:
+        forecast = forecaster.forecast(network_state_agent=net_state)
+        st.session_state.last_forecast = forecast
+
+    pred_stage = forecast.get("predicted_stage", "BENIGN_NORMAL")
+    pred_prob = forecast.get("probability", 0.0)
+    conf = forecast.get("confidence", 0.0)
+    uncertainty = forecast.get("uncertainty", 0.0)
+    future_level = forecast.get("future_threat_level", "LOW")
+    mitre_tech = forecast.get("mitre_technique", "None (Baseline)")
+    posture = forecast.get("recommended_posture", "STANDARD_BASELINE")
+
+    k1, k2, k3, k4 = st.columns(4)
+    level_color = "🔴" if future_level == "CRITICAL" else "🟠" if future_level == "HIGH" else "🟡" if future_level == "MEDIUM" else "🟢"
+    k1.metric("Predicted Threat Level", f"{level_color} {future_level}")
+    k2.metric("Predicted ATT&CK Stage", pred_stage.replace("_", " "))
+    k3.metric("Progression Confidence", f"{conf * 100:.1f}%", delta=f"Uncertainty: {uncertainty * 100:.1f}%", delta_color="inverse")
+    k4.metric("Forecast Horizon", forecast.get("horizon", "30s"))
+
+    st.markdown("---")
+
+    st.markdown("### 🗺️ Threat Progression Trajectory (MITRE ATT&CK Stages)")
+    stages = ["BENIGN_NORMAL", "RECONNAISSANCE", "INITIAL_ACCESS", "LATERAL_MOVEMENT", "DENIAL_OF_SERVICE", "DATA_EXFILTRATION"]
+    stage_cols = st.columns(len(stages))
+    for idx, (col, s_name) in enumerate(zip(stage_cols, stages)):
+        is_current = (s_name == pred_stage)
+        badge_border = "2px solid #ef4444" if (is_current and s_name != "BENIGN_NORMAL") else "2px solid #10b981" if is_current else "1px solid #334155"
+        badge_bg = "rgba(239, 68, 68, 0.15)" if (is_current and s_name != "BENIGN_NORMAL") else "rgba(16, 185, 129, 0.15)" if is_current else "rgba(30, 41, 59, 0.5)"
+        status_marker = "📍 ACTIVE" if is_current else f"Stage {idx+1}"
+        
+        with col:
+            st.markdown(
+                f"""
+                <div style="border: {badge_border}; background: {badge_bg}; border-radius: 8px; padding: 10px; text-align: center; margin-bottom: 8px;">
+                    <div style="font-size: 0.75rem; color: #94a3b8;">{status_marker}</div>
+                    <div style="font-weight: 600; font-size: 0.85rem; margin-top: 4px;">{s_name.replace('_', ' ')}</div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+    st.caption(f"**Current Mapping:** `{mitre_tech}` | **Recommended Posture:** `{posture}`")
+
+    st.markdown("---")
+
+    c_left, c_right = st.columns([3, 2])
+
+    with c_left:
+        st.markdown("### 📊 Softmax Stage Probability Distribution")
+        probs = forecast.get("stage_probabilities", {})
+        if probs:
+            prob_df = pd.DataFrame([
+                {"ATT&CK Stage": k.replace("_", " "), "Probability (%)": round(v * 100, 2)}
+                for k, v in probs.items()
+            ]).set_index("ATT&CK Stage")
+            st.bar_chart(prob_df, use_container_width=True)
+        else:
+            st.info("No probability distribution available yet.")
+
+    with c_right:
+        st.markdown("### ⏱️ Multi-Horizon Forecasts")
+        horizons_data = forecast.get("horizons", {})
+        if horizons_data:
+            hz_rows = []
+            for h_label, h_info in horizons_data.items():
+                hz_rows.append({
+                    "Horizon": h_label,
+                    "Projected Stage": h_info.get("stage", pred_stage),
+                    "Attack Prob": f"{h_info.get('projected_prob', 0) * 100:.1f}%",
+                })
+            st.dataframe(pd.DataFrame(hz_rows), use_container_width=True)
+        else:
+            st.write("Horizon forecasts generating...")
+
+        st.markdown("### 🛡️ Recommended Preventive Posture")
+        if future_level in ["CRITICAL", "HIGH"]:
+            st.error(f"⚠️ **Action Required:** {posture}\n\n*Forecasting model advises preemptive rate-limiting or asset isolation to prevent progression to {pred_stage}.*")
+        else:
+            st.success(f"✅ **Normal Posture:** {posture}\n\n*No imminent attack progression detected. Continual passive telemetry ingestion active.*")
+
+    st.markdown("---")
+
+    col_ev, col_hist = st.columns(2)
+
+    with col_ev:
+        st.markdown("### 🧾 Forecast Evidence & Indicators")
+        ev_list = forecast.get("evidence", [])
+        if ev_list:
+            for ev in ev_list:
+                st.markdown(f"- 🔎 **{ev}**")
+        else:
+            st.write("No anomaly indicators currently active.")
+
+    with col_hist:
+        st.markdown("### 📈 Time-Series State Trajectory")
+        if net_state:
+            history = net_state.get_state_history(limit=20)
+            if history:
+                hist_df = pd.DataFrame([
+                    {
+                        "Time": h.get("time_str", ""),
+                        "Attack Prob": h.get("avg_attack_prob", 0.0),
+                        "Attack Ratio": h.get("attack_ratio", 0.0),
+                        "Shield Score": h.get("home_shield_score", 75) / 100.0,
+                    }
+                    for h in history
+                ]).set_index("Time")
+                st.line_chart(hist_df, use_container_width=True)
+            else:
+                st.info("Run threat monitoring or trigger an attack demo to build temporal state history.")
+        else:
+            st.info("Network state history accumulating...")
+
+    st.markdown("---")
+    with st.expander("🧪 Interactive Forecast Simulation (Demo Scenarios)", expanded=False):
+        st.markdown("Test how the forecasting engine dynamically projects attack progression stages based on simulated input signals:")
+        sc1, sc2, sc3 = st.columns(3)
+        if sc1.button("🎯 Scenario: Port Scan Reconnaissance"):
+            if forecaster and net_state:
+                sim_state = {
+                    "attack_ratio": 0.15,
+                    "avg_attack_prob": 0.45,
+                    "session_prob": 0.60,
+                    "session_label": "PortScan",
+                    "network_anomalies": 3,
+                    "device_anomalies": 0,
+                    "honeypot_hits": 0,
+                    "threat_level": "MEDIUM",
+                }
+                st.session_state.last_forecast = forecaster.forecast(current_state=sim_state)
+                st.rerun()
+
+        if sc2.button("💥 Scenario: DDoS Flood Progression"):
+            if forecaster and net_state:
+                sim_state = {
+                    "attack_ratio": 0.85,
+                    "avg_attack_prob": 0.95,
+                    "session_prob": 0.98,
+                    "session_label": "DDoS_UDP_Flood",
+                    "network_anomalies": 5,
+                    "device_anomalies": 2,
+                    "honeypot_hits": 1,
+                    "threat_level": "CRITICAL",
+                }
+                st.session_state.last_forecast = forecaster.forecast(current_state=sim_state)
+                st.rerun()
+
+        if sc3.button("🍯 Scenario: Honeytoken Lateral Movement"):
+            if forecaster and net_state:
+                sim_state = {
+                    "attack_ratio": 0.20,
+                    "avg_attack_prob": 0.55,
+                    "session_prob": 0.70,
+                    "session_label": "Mirai_Lateral",
+                    "network_anomalies": 1,
+                    "device_anomalies": 1,
+                    "honeypot_hits": 2,
+                    "honeytoken_trips": 1,
+                    "threat_level": "HIGH",
+                }
+                st.session_state.last_forecast = forecaster.forecast(current_state=sim_state)
+                st.rerun()
+
+
+# =========================
+# PAGE 4: POLICY & SAFETY (Architecture Section 7)
+# =========================
+if page == "🛡️ Policy & Safety":
+    st.subheader("🛡️ Policy Gate & Safety Controls")
+    st.caption("Architecture Ref: Section 7 — Mandatory Safety Gate Between Orchestrator and Enforcement Actions. High-impact actions must pass through a policy gate. Raw AI output never executes firewall commands directly.")
+
+    policy_gate = st.session_state.get("policy_gate")
+    allowlist = st.session_state.get("allowlist")
+    audit_trail = st.session_state.get("audit_trail")
+    safety_agent = st.session_state.get("safety_agent")
+
+    st.markdown("### ⚙️ 7-Layer Safety Controls Status")
+    sc_col1, sc_col2, sc_col3, sc_col4 = st.columns(4)
+
+    with sc_col1:
+        st.markdown("**1. Safe Mode**")
+        st.write("Status:", "🔴 ACTIVE" if safe_mode_active else "🟢 INACTIVE")
+        st.caption("Suppresses all auto-enforcement when system health is degraded")
+
+    with sc_col2:
+        st.markdown("**2. Autonomous Mode**")
+        st.write("Status:", "🟢 ENABLED" if autonomous_mode else "⚪ DISABLED")
+        st.caption("Authorizes closed-loop firewall/quarantine responses")
+
+    with sc_col3:
+        st.markdown("**3. Protected Allowlist**")
+        p_count = len(allowlist.list_all()) if allowlist else 0
+        st.write("Status:", f"🛡️ {p_count} Protected IPs")
+        st.caption("Critical devices immune from blind blocks/isolation")
+
+    with sc_col4:
+        st.markdown("**4. Dry-Run Mode**")
+        st.write("Status:", "🧪 SIMULATION ONLY" if dry_run_mode else "⚡ LIVE ENFORCEMENT")
+        st.caption("Validates policies without modifying system firewall")
+
+    sc_col5, sc_col6, sc_col7, sc_col8 = st.columns(4)
+    with sc_col5:
+        st.markdown("**5. Multi-Signal Confirmation**")
+        st.write("Requirement:", "2-of-3 Signals")
+        st.caption("Requires ML + Baseline + Deception corroboration")
+
+    with sc_col6:
+        st.markdown("**6. Action Rate Limiter**")
+        st.write("Limit:", "Max 10 / 60s")
+        st.caption("Prevents cascade action storms and network partition")
+
+    with sc_col7:
+        st.markdown("**7. Verification Agent**")
+        st.write("Status:", "Active (Post-Action)")
+        st.caption("Validates firewall rule existence and traffic suppression")
+
+    with sc_col8:
+        st.markdown("**Threshold Setting**")
+        new_thresh = st.slider("Confidence Gate", 0.50, 0.99, float(policy_gate.confidence_threshold if policy_gate else 0.70), 0.05)
+        if policy_gate:
+            policy_gate.confidence_threshold = new_thresh
+
+    st.markdown("---")
+
+    st.markdown("### 📋 Protected Allowlist Management")
+    al_c1, al_c2 = st.columns([3, 2])
+
+    with al_c1:
+        if allowlist:
+            items = allowlist.list_all()
+            if items:
+                al_df = pd.DataFrame(items)
+                st.dataframe(al_df, use_container_width=True)
+            else:
+                st.info("Allowlist is empty. Add trusted router, server, or gateway IPs below.")
+        else:
+            st.info("Allowlist not initialized")
+
+    with al_c2:
+        with st.form("add_allowlist_form"):
+            st.markdown("**Add Protected IP**")
+            new_ip = st.text_input("IPv4 Address", placeholder="e.g. 192.168.1.1")
+            new_label = st.text_input("Device Label", placeholder="e.g. Core Home Gateway")
+            new_reason = st.text_input("Protection Reason", placeholder="Critical infrastructure")
+            submit_al = st.form_submit_button("➕ Add to Allowlist")
+            if submit_al:
+                if new_ip and allowlist:
+                    allowlist.add(new_ip, label=new_label, reason=new_reason)
+                    st.success(f"Added {new_ip} to protected allowlist")
+                    st.rerun()
+
+        if allowlist and allowlist.list_all():
+            ip_to_del = st.selectbox("Remove from allowlist", options=[item["ip"] for item in allowlist.list_all()])
+            if st.button("🗑️ Remove Selected"):
+                allowlist.remove(ip_to_del)
+                st.success(f"Removed {ip_to_del}")
+                st.rerun()
+
+    st.markdown("---")
+
+    st.markdown("### 🧪 Policy Gate Live Evaluator (Interactive Test)")
+    st.caption("Simulate candidate actions to see how the Policy Gate authorizes or suppresses enforcement:")
+    
+    pe_col1, pe_col2, pe_col3 = st.columns(3)
+    with pe_col1:
+        test_action = st.selectbox("Proposed Action Type", ["BLOCK_IP", "QUARANTINE", "RATE_LIMIT"])
+        test_ip = st.text_input("Target IP", value="192.168.1.55")
+    with pe_col2:
+        test_conf = st.slider("Signal Confidence", 0.10, 1.00, 0.85, 0.05)
+        st.markdown("**Active Evidence Signals:**")
+        sig_ml = st.checkbox("ML Detection (Perception/Session)", value=True)
+        sig_base = st.checkbox("Baseline Anomaly Deviation", value=True)
+        sig_decep = st.checkbox("Deception Hit (Honeypot/Honeytoken)", value=False)
+    with pe_col3:
+        st.markdown("**Evaluation Result:**")
+        if policy_gate:
+            signals = {"ml_detection": sig_ml, "baseline_anomaly": sig_base, "deception_hit": sig_decep}
+            decision = policy_gate.evaluate(action_type=test_action, target=test_ip, confidence=test_conf, signals=signals)
+            if decision.approved:
+                st.success(f"✅ **APPROVED**\n\nReason: {decision.reason}\nSignals: {decision.signals_present}/3 present\nDry-run: {decision.dry_run}")
+            else:
+                st.error(f"⛔ **DENIED**\n\nReason: {decision.reason}\nSignals: {decision.signals_present}/3 present")
+
+    st.markdown("---")
+
+    st.markdown("### 📜 Append-Only Policy Audit Trail")
+    st.caption("Architecture ref: Section 7 & Section 9 — Every decision logged with timestamp, evidence, action, outcome, policy decision, confidence.")
+    if audit_trail:
+        recent_records = audit_trail.query_recent(limit=30)
+        if recent_records:
+            audit_df = pd.DataFrame(recent_records)
+            st.dataframe(audit_df, use_container_width=True)
+        else:
+            st.info("Audit log is currently empty. Actions evaluated by the Policy Gate will record here.")
+    else:
+        st.info("Audit trail module active.")
+
+
+# =========================
+# PAGE 5: RESPONSE + DECEPTION
 # =========================
 if page == "🧠 Response + Deception":
     st.subheader("🧠 Response + Deception Layer")
@@ -1561,67 +2010,174 @@ if page == "🧠 Response + Deception":
 
 
 # =========================
-# PAGE 4: EVIDENCE
+# PAGE 6: EVIDENCE & PERSISTENCE (Architecture Section 9)
 # =========================
 if page == "📁 Evidence":
-    st.subheader("📁 Evidence Panel — For Judges")
+    st.subheader("📁 Evidence & Persistence Panel — For Judges & SOC Auditors")
+    st.caption("Architecture Ref: Section 9 — Local Data, Evidence & Service Layout: SQLite (devices, baselines, scores, actions) + Append-only SOC Event Store + Audit Trail")
 
-    st.markdown("### 🧾 Recent Alerts (last 20)")
-    try:
-        with open("logs/alerts.log", "r") as f:
-            alerts = f.readlines()[-20:]
-        if alerts:
-            st.code("".join(alerts))
+    ev_tab1, ev_tab2, ev_tab3, ev_tab4, ev_tab5 = st.tabs([
+        "🗄️ SQLite Database",
+        "📜 Structured Audit Trail",
+        "📋 SOC Event Store",
+        "🧾 Real-time Text Logs",
+        "⛔ Mitigation Inventory",
+    ])
+
+    shield_db = st.session_state.get("shield_db")
+    audit_trail = st.session_state.get("audit_trail")
+    evidence_store = st.session_state.get("evidence_store")
+
+    with ev_tab1:
+        st.markdown("### 🗄️ SQLite Local Persistence (`data/shield.db`)")
+        st.caption("Architecture Ref: Section 9 — 'SQLite: devices, baselines, scores, actions. Fast local state.'")
+        if shield_db:
+            db_stats = shield_db.get_stats()
+            s1, s2, s3, s4, s5 = st.columns(5)
+            s1.metric("Persisted Devices", db_stats.get("devices", 0))
+            s2.metric("Enforcement Actions", db_stats.get("actions", 0))
+            s3.metric("Baseline Records", db_stats.get("baselines", 0))
+            s4.metric("Security Events", db_stats.get("events", 0))
+            s5.metric("Score History", db_stats.get("scores", 0))
+
+            table_view = st.selectbox("Select SQLite Table to Inspect", ["devices", "actions", "events", "scores", "baselines"])
+            if table_view == "devices":
+                devs = shield_db.get_devices()
+                if devs:
+                    st.dataframe(pd.DataFrame(devs), use_container_width=True)
+                else:
+                    st.info("No devices in SQLite database yet. Click 'Sync Current Inventory' below.")
+            elif table_view == "actions":
+                acts = shield_db.get_recent_actions(limit=50)
+                if acts:
+                    st.dataframe(pd.DataFrame(acts), use_container_width=True)
+                else:
+                    st.info("No enforcement actions stored in SQLite yet.")
+            elif table_view == "events":
+                evts = shield_db.get_recent_events(limit=50)
+                if evts:
+                    st.dataframe(pd.DataFrame(evts), use_container_width=True)
+                else:
+                    st.info("No security events stored in SQLite yet.")
+            elif table_view == "scores":
+                scs = shield_db.get_score_history(limit=50)
+                if scs:
+                    st.dataframe(pd.DataFrame(scs), use_container_width=True)
+                else:
+                    st.info("No scores stored in SQLite yet.")
+            elif table_view == "baselines":
+                bls = shield_db.get_baseline()
+                if bls:
+                    st.dataframe(pd.DataFrame(bls), use_container_width=True)
+                else:
+                    st.info("No baseline records stored in SQLite yet.")
+
+            if st.button("🔄 Sync Active Inventory to SQLite"):
+                devices_to_save = st.session_state.get("devices", [])
+                if devices_to_save:
+                    shield_db.save_devices(devices_to_save)
+                    st.success(f"Synced {len(devices_to_save)} devices into SQLite data/shield.db")
+                    st.rerun()
         else:
-            st.info("No alerts logged yet.")
-    except Exception as e:
-        st.error(f"Could not read alerts.log: {e}")
+            st.warning("ShieldDatabase module not available.")
 
-    st.divider()
-
-    st.markdown("### 🕵️ Honeypot Events (last 20)")
-    try:
-        with open("logs/honeypot.log", "r") as f:
-            hlines = f.readlines()[-20:]
-        if hlines:
-            st.code("".join(hlines))
+    with ev_tab2:
+        st.markdown("### 📜 Append-Only Audit Trail (`security/audit.py`)")
+        st.caption("Architecture Ref: Section 7 — 'Audit trail: Explain every decision. Timestamp + evidence + action + outcome.'")
+        if audit_trail:
+            audits = audit_trail.query_recent(limit=50)
+            if audits:
+                st.dataframe(pd.DataFrame(audits), use_container_width=True)
+            else:
+                st.info("No audit trail entries recorded yet. Actions evaluated by SafetyAgent/PolicyGate will appear here.")
         else:
-            st.info("No honeypot events yet.")
-    except Exception as e:
-        st.error(f"Could not read honeypot.log: {e}")
+            st.info("AuditTrail module active.")
 
-    st.divider()
+    with ev_tab3:
+        st.markdown("### 📋 Structured SOC Evidence Store (`storage/evidence.py`)")
+        st.caption("Architecture Ref: Section 9 — 'Append-only event log: SOC events. Days/weeks retention. Audit trail.'")
+        if evidence_store:
+            ev_stats = evidence_store.get_stats()
+            st.write(f"Total structured events stored: **{ev_stats.get('total_events', 0)}**")
+            severity_filter = st.selectbox("Filter by severity", ["ALL", "CRITICAL", "HIGH", "MEDIUM", "LOW"])
+            sev_arg = None if severity_filter == "ALL" else severity_filter
+            ev_records = evidence_store.query_events(severity=sev_arg, limit=50)
+            if ev_records:
+                st.dataframe(pd.DataFrame(ev_records), use_container_width=True)
+            else:
+                st.info("No structured SOC events matching the filter.")
+        else:
+            st.info("EvidenceStore module active.")
 
-    st.markdown("### ⛔ Blocked IPs")
-    st.write(st.session_state.blocked_ips if st.session_state.blocked_ips else "None")
+    with ev_tab4:
+        st.markdown("### 🧾 Text Logs & Diagnostics")
+        col_log1, col_log2 = st.columns(2)
+        with col_log1:
+            st.markdown("**Recent Alerts (`logs/alerts.log`)**")
+            try:
+                with open("logs/alerts.log", "r") as f:
+                    alerts = f.readlines()[-25:]
+                if alerts:
+                    st.code("".join(alerts))
+                else:
+                    st.info("No alerts logged yet.")
+            except Exception as e:
+                st.error(f"Could not read alerts.log: {e}")
 
-    st.markdown("### 🔒 Quarantined Devices")
-    st.write(st.session_state.quarantined_devices if st.session_state.quarantined_devices else "None")
+        with col_log2:
+            st.markdown("**Honeypot Hits (`logs/honeypot.log`)**")
+            try:
+                with open("logs/honeypot.log", "r") as f:
+                    hlines = f.readlines()[-25:]
+                if hlines:
+                    st.code("".join(hlines))
+                else:
+                    st.info("No honeypot events yet.")
+            except Exception as e:
+                st.error(f"Could not read honeypot.log: {e}")
 
-    st.divider()
+    with ev_tab5:
+        st.markdown("### ⛔ Active Mitigations & Safe Mode Status")
+        m_c1, m_c2 = st.columns(2)
+        with m_c1:
+            st.markdown("**Blocked Attacker IPs:**")
+            if st.session_state.blocked_ips:
+                st.dataframe(pd.DataFrame([{"Blocked IP": ip} for ip in st.session_state.blocked_ips]), use_container_width=True)
+            else:
+                st.write("No active IP blocks.")
 
-    st.markdown("### 🚫 Suppressed Actions (Safe Mode)")
-    if st.session_state.suppressed_actions:
-        dfsa = pd.DataFrame(st.session_state.suppressed_actions)
-        if "time" in dfsa.columns:
-            dfsa["time"] = dfsa["time"].apply(
-                lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
-                if isinstance(t, (int, float))
-                else t
-            )
-        st.dataframe(dfsa, use_container_width=True)
-        if st.button("Clear Suppressed Actions"):
-            st.session_state.suppressed_actions = []
-    else:
-        st.write("None")
+        with m_c2:
+            st.markdown("**Quarantined Devices:**")
+            if st.session_state.quarantined_devices:
+                st.dataframe(pd.DataFrame([{"Quarantined IP": q} for q in st.session_state.quarantined_devices]), use_container_width=True)
+            else:
+                st.write("No quarantined devices.")
 
-    st.markdown("### 📊 Risk Leaderboard (Top 5)")
-    try:
-        df_all = pd.DataFrame(st.session_state.devices)
-        top5 = df_all.sort_values("risk_score", ascending=False).head(5)
-        st.dataframe(top5[["device_name", "ip", "risk_level", "risk_score"]].reset_index(drop=True))
-    except Exception:
-        st.info("No device data available")
+        st.markdown("---")
+        st.markdown("### 🚫 Suppressed Actions (Safe Mode)")
+        if st.session_state.suppressed_actions:
+            dfsa = pd.DataFrame(st.session_state.suppressed_actions)
+            if "time" in dfsa.columns:
+                dfsa["time"] = dfsa["time"].apply(
+                    lambda t: time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
+                    if isinstance(t, (int, float))
+                    else t
+                )
+            st.dataframe(dfsa, use_container_width=True)
+            if st.button("Clear Suppressed Actions"):
+                st.session_state.suppressed_actions = []
+                st.rerun()
+        else:
+            st.write("No actions suppressed.")
+
+        st.markdown("---")
+        st.markdown("### 📊 Device Risk Posture (Top 5)")
+        try:
+            df_all = pd.DataFrame(st.session_state.devices)
+            top5 = df_all.sort_values("risk_score", ascending=False).head(5)
+            st.dataframe(top5[["device_name", "ip", "risk_level", "risk_score"]].reset_index(drop=True), use_container_width=True)
+        except Exception:
+            st.info("No device data available")
 
 
 # =========================

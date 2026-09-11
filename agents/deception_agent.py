@@ -31,7 +31,7 @@ def _honeypot_server(host="0.0.0.0", port=9999):
         _log_honeypot_event(attacker_ip, attacker_port, message="HONEYPOT_TRIGGERED")
         try:
             conn.sendall(b"Fake IoT Service: Access Denied.\n")
-        except:
+        except Exception:
             pass
         conn.close()
 

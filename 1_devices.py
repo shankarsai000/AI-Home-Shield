@@ -2,14 +2,14 @@ import streamlit as st
 import pandas as pd
 import time
 
-from utils.device_scanner_win import discover_devices, scan_ports
+from utils.device_scanner_win import discover_devices, scan_ports, get_default_subnet
 
 st.set_page_config(page_title="Devices", layout="wide")
 st.title("📡 AI Home Shield — Devices")
 
 st.subheader("📡 Real-time Device Discovery (Windows + Nmap Safe Mode)")
 
-subnet = st.text_input("Subnet to scan", value="172.24.118.0/24")
+subnet = st.text_input("Subnet to scan", value=get_default_subnet())
 
 col1, col2 = st.columns([1, 1])
 scan_now = col1.button("🔍 Scan Devices Now")

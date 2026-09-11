@@ -1,5 +1,4 @@
 # agents/risk_agent.py
-print("✅ UPDATED risk_agent.py LOADED")
 
 RISKY_PORTS = {
     23: ("TELNET", 5),

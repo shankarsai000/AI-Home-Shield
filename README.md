@@ -141,44 +141,88 @@ Logs stored in:
 ---
 
 ## 🏗️ Project Structure
+```text
 AI_Home_Shield/
-├── app.py
+├── app.py                     # Streamlit Security Operations Dashboard
+├── 1_devices.py               # Device Discovery & Network Scanning
+├── AI_Home_Shield_Final_End_to_End_System_Architecture.pdf # System Architecture Spec
 ├── agents/
+│   ├── orchestrator_agent.py      # Multi-signal correlation & autonomous governance
+│   ├── attack_forecasting_agent.py# ATT&CK progression & horizon risk modeling
+│   ├── network_state_agent.py     # Time-indexed state & metric representations
+│   ├── safety_agent.py            # Safety constraints & operational mode checks
+│   ├── verification_agent.py      # Pre/post-action firewall rule verification
+│   ├── firewall_agent.py          # Cross-platform netsh / iptables enforcement
+│   ├── deception_agent.py         # Honeypot & Honeytoken trap controllers
+│   ├── perception_agent.py        # ML-based flow threat inference
+│   ├── risk_agent.py              # IoT device vulnerability & risk profiling
+│   └── session_aggregation_agent.py# Sliding-window session stability
+├── capture/
+│   ├── packet_capture.py          # Live Scapy adapter with filter & async worker
+│   ├── flow_builder.py            # 5-tuple bidirectional flow aggregator
+│   └── feature_extractor.py       # 46-dimensional statistical feature engine
+├── security/
+│   ├── policy.py                  # PolicyGate safety controls & approval logic
+│   ├── allowlist.py               # RFC 1918 & gateway protection lists
+│   └── audit.py                   # Append-only forensic JSONL audit trail
+├── storage/
+│   ├── database.py                # Thread-safe SQLite relational device/threat store
+│   └── evidence.py                # SOC event logging & forensic query engine
+├── tests/
+│   └── test_suite.py              # Unified 9-suite automated verification
 ├── utils/
-├── data/
-├── logs/
-├── honeytokens/
-├── models/
-├── requirements.txt
-
+│   ├── device_scanner_win.py      # Nmap + Npcap ARP & port scanner
+│   ├── baseline_engine.py         # Network behavioral baseline & anomaly detection
+│   └── xai_explainer.py           # Explainable AI risk factors
+├── data/                          # Flow datasets & baseline models
+├── honeytokens/                   # Active deception canary artifacts
+└── requirements.txt               # Production Python dependencies
+```
 
 ---
 
 ## ⚙️ Installation & Run
 
-### ✅ Setup
+### 1. Prerequisites
+- **Python 3.10+**
+- **Nmap & Npcap** (for live network ARP and port scanning on Windows)
+  - Ensure Nmap is installed and added to `PATH` or at `C:\Users\<user>\nmap.exe` or standard `C:\Program Files (x86)\Nmap\nmap.exe`.
+
+### 2. Install Dependencies
 ```bash
 pip install -r requirements.txt
+```
 
+### 3. Run Automated Tests
+Verify all 9 security, capture, policy, and agent test suites pass:
+```bash
+python tests/test_suite.py
+```
+
+### 4. Launch AI Home Shield Dashboard
+```bash
 streamlit run app.py
-⚠️ Run as Administrator (Windows recommended) for firewall blocking to work properly.
+```
+> ⚠️ **Note**: Run the command in an elevated prompt (Run as Administrator on Windows) if enabling live firewall blocking via `netsh` or raw packet capture.
 
-🏆 Achievement
+---
 
-🥉 Won 3rd Prize at IIT Delhi
-✅ Selected from 1100+ teams
+## 🏆 Achievement
+
+🥉 **Won 3rd Prize at IIT Delhi**  
+✅ Selected from 1100+ teams  
 ✅ Built and demonstrated as a complete working prototype with real-time response + deception + edge mitigation.
 
-📌 Future Scope
+---
 
-Deploy as router/gateway for whole-home visibility
+## 📌 Deployment Roadmap
+- Deploy as router/gateway for whole-home visibility
+- Mobile notifications + cloud threat intelligence
+- Device fingerprinting + automated firmware validation
+- Multi-home fleet dashboard (privacy-safe)
 
-Mobile notifications + cloud threat intelligence
+---
 
-Device fingerprinting + automated firmware validation
-
-Multi-home fleet dashboard (privacy-safe)
-
-🙌 Acknowledgements
-
+## 🙌 Acknowledgements
 Special thanks to our college management and mentors for supporting us and sponsoring travel from Davangere to Delhi, making this achievement possible.
+

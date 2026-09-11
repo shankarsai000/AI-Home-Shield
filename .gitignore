@@ -10,6 +10,8 @@ captures/
 # Specific data files and packet captures
 data/live_flows.csv
 data/*.pcap
+data/*.db
+data/test_*
 
 # Environment and secrets
 .env

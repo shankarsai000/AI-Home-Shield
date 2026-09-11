@@ -1,63 +1,152 @@
-import subprocess
+"""
+utils/device_scanner_win.py
+
+Windows / Cross-Platform Device & Port Scanner using Nmap + Npcap.
+
+Architecture ref: Section 3 & 4 — LAN Discovery and Device Inventory.
+Uses ARP ping scan (-sn -PR) with Npcap driver for fast Layer 2 discovery on the local LAN.
+"""
+
+import os
 import re
+import shutil
+import socket
+import subprocess
 import time
+import ipaddress
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
+
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
+
+def find_nmap_path() -> str:
+    """Find the path to the nmap executable on Windows or Linux."""
+    # 1. Check system PATH
+    p = shutil.which("nmap")
+    if p and os.path.exists(p):
+        return p
+
+    # 2. Check common Windows installation paths
+    candidates = [
+        os.path.expanduser("~/nmap.exe"),
+        r"C:\Users\shank\nmap.exe",
+        r"C:\Program Files (x86)\Nmap\nmap.exe",
+        r"C:\Program Files\Nmap\nmap.exe",
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+
+    return "nmap"
+
+
+def get_default_subnet() -> str:
+    """
+    Dynamically detect the active local LAN IPv4 subnet (e.g., 172.21.6.0/24).
+    """
+    try:
+        # Route probe to external IP to get active local adapter IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+
+        if psutil:
+            for iface_name, addrs in psutil.net_if_addrs().items():
+                for addr in addrs:
+                    if addr.family == socket.AF_INET and addr.address == local_ip:
+                        netmask = addr.netmask or "255.255.255.0"
+                        net = ipaddress.IPv4Network(f"{local_ip}/{netmask}", strict=False)
+                        return str(net)
+
+        parts = local_ip.split(".")
+        return f"{parts[0]}.{parts[1]}.{parts[2]}.0/24"
+    except Exception:
+        pass
+
+    return "172.21.6.0/24"
+
+
+def _valid_target_spec(target: str) -> bool:
+    target = target.strip()
+    if re.search(r"[;&|`$<>]", target):
+        return False
+    # CIDR (e.g. 172.21.6.0/24)
+    if re.match(r"^(\d{1,3}(?:\.\d{1,3}){3})/(\d{1,2})$", target):
+        return True
+    # Single IP (e.g. 172.21.6.1)
+    if re.match(r"^(\d{1,3}(?:\.\d{1,3}){3})$", target):
+        return True
+    # IP range (e.g. 172.21.6.1-50 or 172.21.6.1-172.21.6.50)
+    if re.match(r"^(\d{1,3}(?:\.\d{1,3}){3})-(\d{1,3}(?:\.\d{1,3})*)$", target):
+        return True
+    return False
 
 
 def _valid_cidr(cidr: str) -> bool:
-    m = re.match(r"^(\d{1,3}(?:\.\d{1,3}){3})/(\d{1,2})$", cidr.strip())
-    if not m:
-        return False
-    ip = m.group(1)
-    mask = int(m.group(2))
-    if not (0 <= mask <= 32):
-        return False
-    parts = ip.split(".")
-    for p in parts:
-        try:
-            v = int(p)
-        except Exception:
-            return False
-        if v < 0 or v > 255:
-            return False
-    return True
+    return _valid_target_spec(cidr)
 
 
 def _valid_ip(ip: str) -> bool:
-    m = re.match(r"^(\d{1,3}(?:\.\d{1,3}){3})$", ip.strip())
-    if not m:
-        return False
-    parts = ip.split(".")
-    for p in parts:
-        try:
-            v = int(p)
-        except Exception:
-            return False
-        if v < 0 or v > 255:
-            return False
-    return True
+    return _valid_target_spec(ip)
 
 
-def discover_devices(subnet: str = "172.24.118.0/24") -> List[Dict]:
-    """Run a safe ARP discovery using nmap -sn -PR <subnet>/24 --reason and parse results.
+def _fallback_arp_scan() -> List[Dict]:
+    """Fallback: parse Windows arp -a table if Nmap is inaccessible."""
+    devices = []
+    try:
+        res = subprocess.run("arp -a", shell=True, capture_output=True, text=True, timeout=5)
+        out = res.stdout or ""
+        now = datetime.utcnow().isoformat()
+        for line in out.splitlines():
+            line = line.strip()
+            # Match IPv4 and MAC
+            m = re.match(r"(\d+\.\d+\.\d+\.\d+)\s+([0-9a-fA-F-]+)\s+(\w+)", line)
+            if m:
+                ip = m.group(1)
+                mac = m.group(2).replace("-", ":").upper()
+                typ = m.group(3).lower()
+                # Skip broadcast and multicast
+                if typ == "dynamic" and not ip.endswith(".255") and not ip.startswith("224.") and not ip.startswith("239."):
+                    devices.append({
+                        "ip": ip,
+                        "mac": mac,
+                        "vendor": "Local ARP device",
+                        "status": "up",
+                        "last_seen": now,
+                    })
+    except Exception:
+        pass
+    return devices
+
+
+def discover_devices(subnet: Optional[str] = None) -> List[Dict]:
+    """Run an ARP discovery scan using Nmap + Npcap (-sn -PR --min-rate 300).
 
     Returns list of dicts: {ip, mac, vendor, status, last_seen}
     """
+    if not subnet:
+        subnet = get_default_subnet()
     subnet = subnet.strip()
+
     if not _valid_cidr(subnet):
         raise ValueError(f"Invalid subnet/CIDR: {subnet}")
 
-    cmd = f"nmap -sn -PR {subnet} --reason"
+    nmap_bin = find_nmap_path()
+    # Use -sn -PR with --min-rate 300 for fast Layer-2 ARP response gathering
+    cmd = f'"{nmap_bin}" -sn -PR --min-rate 300 {subnet} --reason'
 
     try:
-        res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+        out = res.stdout or ""
     except Exception:
-        return []
+        out = ""
 
-    out = res.stdout or ""
     lines = out.splitlines()
-
     devices = []
     current = {}
 
@@ -72,12 +161,10 @@ def discover_devices(subnet: str = "172.24.118.0/24") -> List[Dict]:
 
         m = ip_re.search(ln)
         if m:
-            # start of new host
             if current:
-                # finalize previous
                 current.setdefault("mac", "")
-                current.setdefault("vendor", "")
-                current.setdefault("status", "unknown")
+                current.setdefault("vendor", "Unknown")
+                current.setdefault("status", "up")
                 current.setdefault("last_seen", datetime.utcnow().isoformat())
                 devices.append(current)
                 current = {}
@@ -93,25 +180,27 @@ def discover_devices(subnet: str = "172.24.118.0/24") -> List[Dict]:
         m = mac_re.search(ln)
         if m and current:
             current["mac"] = m.group(1)
-            vendor = m.group(2).strip() if m.group(2) else ""
+            vendor = m.group(2).strip() if m.group(2) else "Unknown"
             current["vendor"] = vendor
             continue
 
-        # lines with "is up" and latency sometimes include reason
-        # ignore other lines
-
     if current:
         current.setdefault("mac", "")
-        current.setdefault("vendor", "")
-        current.setdefault("status", "unknown")
+        current.setdefault("vendor", "Unknown")
+        current.setdefault("status", "up")
         current.setdefault("last_seen", datetime.utcnow().isoformat())
         devices.append(current)
 
-    # ensure last_seen exists
+    # If Nmap returned no devices (e.g. permission or network isolate), fall back to ARP table
+    if not devices:
+        devices = _fallback_arp_scan()
+
     now = datetime.utcnow().isoformat()
     for d in devices:
         if "last_seen" not in d or not d["last_seen"]:
             d["last_seen"] = now
+        if not d.get("vendor"):
+            d["vendor"] = "Unknown"
 
     return devices
 
@@ -125,16 +214,16 @@ def scan_ports(ip: str) -> List[Dict]:
     if not _valid_ip(ip):
         raise ValueError(f"Invalid IP address: {ip}")
 
-    cmd = f"nmap -sT -Pn --top-ports 50 --open {ip}"
+    nmap_bin = find_nmap_path()
+    cmd = f'"{nmap_bin}" -sT -Pn --top-ports 50 --open {ip}'
 
     try:
-        res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=20)
+        out = res.stdout or ""
     except Exception:
         return []
 
-    out = res.stdout or ""
     ports = []
-
     # parse lines like: "22/tcp open  ssh"
     port_re = re.compile(r"^(\d+)/(tcp|udp)\s+open\s+(\S+)")
     for line in out.splitlines():
@@ -145,74 +234,4 @@ def scan_ports(ip: str) -> List[Dict]:
             service = m.group(3)
             ports.append({"port": port, "service": service})
 
-    return ports
-# utils/device_scanner_win.py
-
-import subprocess
-import re
-from datetime import datetime
-
-def run_cmd(cmd):
-    """Run a shell command and return output safely."""
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        shell=True
-    )
-    return result.stdout
-
-def discover_devices(subnet="172.24.118.0/24"):
-    """
-    Safe device discovery using Nmap ARP scan.
-    Returns list of devices with IP, MAC, last_seen.
-    """
-    cmd = f"nmap -sn -PR {subnet} --reason"
-    out = run_cmd(cmd)
-
-    devices = []
-    current_ip = None
-
-    for line in out.splitlines():
-        line = line.strip()
-
-        # Example: Nmap scan report for 172.24.118.144
-        m_ip = re.search(r"Nmap scan report for ([0-9.]+)", line)
-        if m_ip:
-            current_ip = m_ip.group(1)
-            devices.append({
-                "ip": current_ip,
-                "mac": "N/A",
-                "vendor": "Unknown",
-                "status": "UP",
-                "last_seen": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            })
-            continue
-
-        # Example: MAC Address: D6:0C:EE:A1:97:DB (Unknown)
-        m_mac = re.search(r"MAC Address:\s*([0-9A-F:]+)\s*\((.*)\)", line, re.I)
-        if m_mac and devices:
-            devices[-1]["mac"] = m_mac.group(1).upper()
-            devices[-1]["vendor"] = m_mac.group(2)
-
-    return devices
-
-def scan_ports(ip):
-    """
-    Safe port scan using TCP connect scan (no raw packets).
-    Returns list of open ports (port, service).
-    """
-    cmd = f"nmap -sT -Pn --top-ports 50 --open {ip}"
-    out = run_cmd(cmd)
-
-    ports = []
-    for line in out.splitlines():
-        line = line.strip()
-        # Example: 53/tcp open  domain
-        m = re.match(r"(\d+)/tcp\s+open\s+(\S+)", line)
-        if m:
-            ports.append({
-                "port": int(m.group(1)),
-                "service": m.group(2)
-            })
     return ports
